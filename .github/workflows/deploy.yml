@@ -17,16 +17,12 @@ jobs:
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
+            export BUN=/home/ubuntu/.bun/bin/bun
             cd ~/meeting
 
-            # Pull latest code
             git pull origin main
 
-            # Install dependencies
-            ~/.bun/bin/bun install
+            $BUN install
+            $BUN x next build --webpack
 
-            # Build
-            ~/.bun/bin/bunx next build --webpack
-
-            # Restart
-            pm2 restart meeting
+            sudo systemctl restart meeting
