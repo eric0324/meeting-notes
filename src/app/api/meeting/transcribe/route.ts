@@ -7,6 +7,7 @@ import {
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import Anthropic from "@anthropic-ai/sdk";
 import { google } from "googleapis";
+import { Readable } from "stream";
 
 const s3 = new S3Client({ region: process.env.AWS_REGION });
 const transcribe = new TranscribeClient({ region: process.env.AWS_REGION });
@@ -17,7 +18,8 @@ async function processInBackground(
   s3Key: string,
   room: string,
   attendees: { name: string; email: string }[],
-  date: string
+  date: string,
+  audioBuffer: ArrayBuffer
 ) {
   try {
     // 1. Poll Transcribe until done
@@ -127,9 +129,9 @@ ${formattedTranscript.trim()}
       fields: "files(id)",
     });
 
-    let folderId: string;
+    let roomFolderId: string;
     if (search.data.files && search.data.files.length > 0) {
-      folderId = search.data.files[0].id!;
+      roomFolderId = search.data.files[0].id!;
     } else {
       const folder = await drive.files.create({
         requestBody: {
@@ -139,29 +141,64 @@ ${formattedTranscript.trim()}
         },
         fields: "id",
       });
-      folderId = folder.data.id!;
+      roomFolderId = folder.data.id!;
     }
 
-    // Create Google Doc
-    const fileName = `${date} - ${room} 會議記錄`;
-    const doc = await drive.files.create({
+    // Create meeting subfolder
+    const prefix = `${date} - ${room}`;
+    const meetingFolder = await drive.files.create({
       requestBody: {
-        name: fileName,
+        name: prefix,
+        mimeType: "application/vnd.google-apps.folder",
+        parents: [roomFolderId],
+      },
+      fields: "id,webViewLink",
+    });
+    const meetingFolderId = meetingFolder.data.id!;
+
+    // Upload audio (.webm)
+    await drive.files.create({
+      requestBody: {
+        name: `${prefix} 音訊.webm`,
+        parents: [meetingFolderId],
+      },
+      media: {
+        mimeType: "audio/webm",
+        body: Readable.from(Buffer.from(audioBuffer)),
+      },
+    });
+
+    // Upload transcript (Google Doc)
+    await drive.files.create({
+      requestBody: {
+        name: `${prefix} 逐字稿`,
         mimeType: "application/vnd.google-apps.document",
-        parents: [folderId],
+        parents: [meetingFolderId],
+      },
+      media: {
+        mimeType: "text/plain",
+        body: formattedTranscript.trim(),
+      },
+    });
+
+    // Upload meeting notes (Google Doc)
+    await drive.files.create({
+      requestBody: {
+        name: `${prefix} 會議記錄`,
+        mimeType: "application/vnd.google-apps.document",
+        parents: [meetingFolderId],
       },
       media: {
         mimeType: "text/plain",
         body: summary,
       },
-      fields: "id,webViewLink",
     });
 
-    // Share with attendees
+    // Share folder with attendees (files inherit)
     for (const attendee of attendees) {
       try {
         await drive.permissions.create({
-          fileId: doc.data.id!,
+          fileId: meetingFolderId,
           requestBody: {
             type: "user",
             role: "writer",
@@ -174,7 +211,7 @@ ${formattedTranscript.trim()}
       }
     }
 
-    console.log(`[${jobName}] Done! Google Doc: ${doc.data.webViewLink}`);
+    console.log(`[${jobName}] Done! Folder: ${meetingFolder.data.webViewLink}`);
   } catch (error) {
     console.error(`[${jobName}] Background processing failed:`, error);
   }
@@ -230,7 +267,7 @@ export async function POST(request: NextRequest) {
     );
 
     // Fire and forget — process in background
-    processInBackground(jobName, s3Key, room, attendees, date);
+    processInBackground(jobName, s3Key, room, attendees, date, audioBuffer);
 
     return NextResponse.json({ jobName, status: "processing" });
   } catch (error) {
